@@ -86,7 +86,7 @@ def create_scout_agent(
                     fit_score=s["score"],
                     notes=s["reasoning"],
                 )
-                if s["promote"]:
+                if new_status == "cold":
                     promoted += 1
                 else:
                     dropped += 1
