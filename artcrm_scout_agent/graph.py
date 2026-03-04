@@ -14,6 +14,7 @@ def create_scout_agent(
     start_run: RunStarter,
     finish_run: RunFinisher,
     mission: AgentMission,
+    threshold: int = 60,
 ):
     """
     Build and return a compiled LangGraph scout agent.
@@ -78,7 +79,7 @@ def create_scout_agent(
         dropped = 0
         for s in state.get("scores", []):
             try:
-                new_status = "cold" if s["promote"] else "dropped"
+                new_status = "cold" if s["score"] >= threshold else "dropped"
                 update_contact(
                     contact_id=s["contact_id"],
                     status=new_status,
