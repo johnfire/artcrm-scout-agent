@@ -31,6 +31,11 @@ class ContactUpdater(Protocol):
     def __call__(self, contact_id: int, status: str, fit_score: int, notes: str = "") -> None: ...
 
 
+class PageFetcher(Protocol):
+    """Fetch plain text content of a URL. Returns empty string on failure."""
+    def __call__(self, url: str) -> str: ...
+
+
 class RunStarter(Protocol):
     """Log the start of an agent run. Returns run_id."""
     def __call__(self, agent_name: str, input_data: dict) -> int: ...
