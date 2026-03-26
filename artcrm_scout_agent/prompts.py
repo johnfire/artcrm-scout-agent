@@ -2,14 +2,21 @@ import json
 from .protocols import AgentMission
 
 
-def score_gallery_prompt(mission: AgentMission, contact: dict) -> tuple[str, str]:
+def score_gallery_prompt(mission: AgentMission, contact: dict, city_context: dict | None = None) -> tuple[str, str]:
     """
     Gallery-specific evaluation prompt. Reads the gallery's website content
     to determine whether they show emerging/regional/mid-career artists.
     """
+    city_context_str = ""
+    if city_context and city_context.get("market_character", "unknown") != "unknown":
+        char = city_context["market_character"]
+        notes = city_context.get("market_notes", "")
+        city_context_str = f"\nCity market context ({char}): {notes}\n"
+
     system = (
         f"You are researching art galleries on behalf of {mission.identity}.\n"
-        f"Mission: {mission.goal}\n\n"
+        f"Mission: {mission.goal}\n"
+        f"{city_context_str}\n"
         f"Your task: read this gallery's website content carefully and determine "
         f"whether they are a realistic outreach target — meaning they actually show "
         f"emerging, regional, or mid-career artists.\n\n"

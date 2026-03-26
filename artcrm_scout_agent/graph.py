@@ -1,7 +1,7 @@
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
 
-from .protocols import AgentMission, LanguageModel, CandidateFetcher, ContactUpdater, PageFetcher, RunStarter, RunFinisher
+from .protocols import AgentMission, LanguageModel, CandidateFetcher, ContactUpdater, PageFetcher, CityContextFetcher, RunStarter, RunFinisher
 from .state import ScoutState
 from .prompts import score_gallery_prompt
 from ._utils import parse_json_response
@@ -14,6 +14,7 @@ def create_scout_agent(
     fetch_candidates: CandidateFetcher,
     update_contact: ContactUpdater,
     fetch_page: PageFetcher,
+    fetch_city_context: CityContextFetcher,
     start_run: RunStarter,
     finish_run: RunFinisher,
     mission: AgentMission,
@@ -103,12 +104,22 @@ def create_scout_agent(
         return {"gallery_candidates": enriched}
 
     def score_galleries(state: ScoutState) -> dict:
-        """LLM evaluates each gallery based on website content and notes."""
+        """LLM evaluates each gallery based on website content, notes, and city market context."""
         if not state.get("gallery_candidates"):
             return {"scores": []}
         scores = []
+        city_context_cache: dict[str, dict] = {}
         for contact in state["gallery_candidates"]:
-            system, user = score_gallery_prompt(mission, contact)
+            city = contact.get("city", "")
+            country = contact.get("country", "DE")
+            cache_key = f"{city}:{country}"
+            if cache_key not in city_context_cache:
+                try:
+                    city_context_cache[cache_key] = fetch_city_context(city, country)
+                except Exception:
+                    city_context_cache[cache_key] = {}
+            city_context = city_context_cache[cache_key]
+            system, user = score_gallery_prompt(mission, contact, city_context)
             try:
                 response = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
                 result = parse_json_response(response.content)

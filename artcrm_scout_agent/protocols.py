@@ -36,6 +36,11 @@ class PageFetcher(Protocol):
     def __call__(self, url: str) -> str: ...
 
 
+class CityContextFetcher(Protocol):
+    """Return market_character and market_notes for a city."""
+    def __call__(self, city: str, country: str = "DE") -> dict: ...
+
+
 class RunStarter(Protocol):
     """Log the start of an agent run. Returns run_id."""
     def __call__(self, agent_name: str, input_data: dict) -> int: ...
