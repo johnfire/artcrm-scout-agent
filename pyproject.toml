@@ -2,9 +2,8 @@
 name = "artcrm-scout-agent"
 version = "0.1.0"
 requires-python = ">=3.11"
-description = "LangGraph agent that scores candidate contacts for mission fit."
+description = "Scout agent that scores candidate contacts for mission fit."
 dependencies = [
-    "langgraph>=0.2.0",
     "langchain-core>=0.3.0",
 ]
 
@@ -22,3 +21,8 @@ packages = ["artcrm_scout_agent"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

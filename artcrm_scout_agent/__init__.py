@@ -1,5 +1,5 @@
 from .graph import create_scout_agent
-from .protocols import AgentMission, LanguageModel, CandidateFetcher, ContactUpdater, RunStarter, RunFinisher
+from .protocols import AgentMission, LanguageModel, CandidateFetcher, ContactUpdater, PageFetcher, CityContextFetcher, RunStarter, RunFinisher
 from .state import ScoutState
 
 __all__ = [
@@ -8,6 +8,8 @@ __all__ = [
     "LanguageModel",
     "CandidateFetcher",
     "ContactUpdater",
+    "PageFetcher",
+    "CityContextFetcher",
     "RunStarter",
     "RunFinisher",
     "ScoutState",

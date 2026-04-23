@@ -1,76 +1,94 @@
+"""
+Scout agent.
+
+Evaluates candidate contacts and classifies them as cold / maybe / dropped.
+Non-gallery venues are auto-promoted to cold. Galleries are scored by LLM
+using fetched website content and city market context.
+
+Pipeline position: research → enrich → scout → outreach → followup
+"""
+import logging
+
 from langchain_core.messages import SystemMessage, HumanMessage
-from langgraph.graph import StateGraph, END
 
 from .protocols import AgentMission, LanguageModel, CandidateFetcher, ContactUpdater, PageFetcher, CityContextFetcher, RunStarter, RunFinisher
-from .state import ScoutState
 from .prompts import score_gallery_prompt
 from ._utils import parse_json_response
 
+logger = logging.getLogger(__name__)
+
 GALLERY_TYPES = {"gallery"}
+_OUTCOME_SCORE = {"cold": 75, "maybe": 50, "dropped": 20}
 
 
-def create_scout_agent(
-    llm: LanguageModel,
-    fetch_candidates: CandidateFetcher,
-    update_contact: ContactUpdater,
-    fetch_page: PageFetcher,
-    fetch_city_context: CityContextFetcher,
-    start_run: RunStarter,
-    finish_run: RunFinisher,
-    mission: AgentMission,
-):
-    """
-    Build and return a compiled LangGraph scout agent.
+class _ScoutAgent:
+    def __init__(
+        self,
+        llm: LanguageModel,
+        fetch_candidates: CandidateFetcher,
+        update_contact: ContactUpdater,
+        fetch_page: PageFetcher,
+        fetch_city_context: CityContextFetcher,
+        start_run: RunStarter,
+        finish_run: RunFinisher,
+        mission: AgentMission,
+    ):
+        self._llm = llm
+        self._fetch_candidates = fetch_candidates
+        self._update_contact = update_contact
+        self._fetch_page = fetch_page
+        self._fetch_city_context = fetch_city_context
+        self._start_run = start_run
+        self._finish_run = finish_run
+        self._mission = mission
 
-    Non-gallery contacts (cafes, hotels, restaurants, coworking, etc.) are
-    promoted to 'cold' automatically — no LLM evaluation needed.
+    def invoke(self, inputs: dict) -> dict:
+        limit = inputs.get("limit", 50)
+        run_id = self._start_run("scout_agent", {"limit": limit})
 
-    Gallery contacts are researched properly: the agent fetches their website,
-    reads the full content, and asks the LLM whether they show emerging or
-    regional artists. Outcome is cold / maybe / dropped.
+        candidates = self._fetch(limit)
+        galleries, promoted_count = self._split_and_promote(candidates)
+        galleries = self._fetch_gallery_websites(galleries)
+        scores = self._score_galleries(galleries)
+        promoted_count, maybe_count, dropped_count = self._apply_scores(scores, promoted_count)
 
-    Usage:
-        agent = create_scout_agent(llm=..., fetch_candidates=..., ...)
-        result = agent.invoke({"limit": 50})
-        print(result["summary"])
-    """
-
-    def init(state: ScoutState) -> dict:
-        run_id = start_run("scout_agent", {"limit": state.get("limit", 50)})
+        total = len(candidates)
+        gallery_count = len(galleries)
+        summary = (
+            f"scout_agent: {total} candidates — "
+            f"{promoted_count} promoted to cold, {maybe_count} flagged maybe, {dropped_count} dropped "
+            f"({gallery_count} galleries evaluated by LLM)"
+        )
+        self._finish_run(
+            run_id, "completed", summary,
+            {"promoted": promoted_count, "maybe": maybe_count, "dropped": dropped_count, "total": total},
+        )
+        logger.info(summary)
         return {
-            "run_id": run_id,
-            "limit": state.get("limit", 50),
-            "candidates": [],
-            "gallery_candidates": [],
-            "scores": [],
-            "errors": [],
-            "promoted_count": 0,
-            "maybe_count": 0,
-            "dropped_count": 0,
-            "summary": "",
+            "summary": summary,
+            "promoted_count": promoted_count,
+            "maybe_count": maybe_count,
+            "dropped_count": dropped_count,
         }
 
-    def fetch(state: ScoutState) -> dict:
+    def _fetch(self, limit: int) -> list[dict]:
         try:
-            candidates = fetch_candidates(limit=state["limit"])
+            return self._fetch_candidates(limit=limit)
         except Exception as e:
-            return {"errors": state["errors"] + [f"fetch_candidates: {e}"], "candidates": []}
-        return {"candidates": candidates}
+            logger.warning("scout: fetch_candidates failed: %s", e)
+            return []
 
-    def split_and_promote(state: ScoutState) -> dict:
-        """
-        Non-galleries go straight to cold — no evaluation needed.
-        Galleries are collected for website research and LLM scoring.
-        """
+    def _split_and_promote(self, candidates: list[dict]) -> tuple[list[dict], int]:
+        """Auto-promote non-galleries to cold; return galleries for LLM evaluation."""
         promoted = 0
         galleries = []
-        for contact in state.get("candidates", []):
+        for contact in candidates:
             contact_type = (contact.get("type") or "").lower()
             if contact_type in GALLERY_TYPES:
                 galleries.append(contact)
             else:
                 try:
-                    update_contact(
+                    self._update_contact(
                         contact_id=contact["id"],
                         status="cold",
                         fit_score=50,
@@ -79,49 +97,40 @@ def create_scout_agent(
                     promoted += 1
                 except Exception:
                     pass
-        return {"gallery_candidates": galleries, "promoted_count": promoted}
+        return galleries, promoted
 
-    def fetch_gallery_websites(state: ScoutState) -> dict:
-        """
-        Fetch website content for each gallery candidate.
-        Tries the main website; appends fetched text as 'website_content'.
-        Galleries with no website still proceed — LLM uses notes to judge.
-        """
+    def _fetch_gallery_websites(self, galleries: list[dict]) -> list[dict]:
+        """Fetch website content for each gallery; cap at 4000 chars."""
         enriched = []
-        for contact in state.get("gallery_candidates", []):
+        for contact in galleries:
             contact = dict(contact)
             website = contact.get("website", "")
             website_content = ""
             if website:
                 try:
-                    website_content = fetch_page(website)
-                    # cap at 4000 chars — enough for the LLM to read the page properly
-                    website_content = website_content[:4000]
+                    website_content = self._fetch_page(website)[:4000]
                 except Exception:
                     pass
             contact["website_content"] = website_content
             enriched.append(contact)
-        return {"gallery_candidates": enriched}
+        return enriched
 
-    def score_galleries(state: ScoutState) -> dict:
-        """LLM evaluates each gallery based on website content, notes, and city market context."""
-        if not state.get("gallery_candidates"):
-            return {"scores": []}
+    def _score_galleries(self, galleries: list[dict]) -> list[dict]:
+        """LLM evaluates each gallery; outcome is cold / maybe / dropped."""
         scores = []
         city_context_cache: dict[str, dict] = {}
-        for contact in state["gallery_candidates"]:
+        for contact in galleries:
             city = contact.get("city", "")
             country = contact.get("country", "DE")
             cache_key = f"{city}:{country}"
             if cache_key not in city_context_cache:
                 try:
-                    city_context_cache[cache_key] = fetch_city_context(city, country)
+                    city_context_cache[cache_key] = self._fetch_city_context(city, country)
                 except Exception:
                     city_context_cache[cache_key] = {}
-            city_context = city_context_cache[cache_key]
-            system, user = score_gallery_prompt(mission, contact, city_context)
+            system, user = score_gallery_prompt(self._mission, contact, city_context_cache[cache_key])
             try:
-                response = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
+                response = self._llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
                 result = parse_json_response(response.content)
                 outcome = result.get("outcome", "maybe")
                 if outcome not in ("cold", "maybe", "dropped"):
@@ -137,75 +146,59 @@ def create_scout_agent(
                     "outcome": "maybe",
                     "reasoning": f"Scoring error — flagged for manual review: {e}",
                 })
-        return {"scores": scores}
+        return scores
 
-    def apply_scores(state: ScoutState) -> dict:
-        """Write gallery outcomes to the database."""
+    def _apply_scores(self, scores: list[dict], promoted_count: int) -> tuple[int, int, int]:
+        """Write gallery outcomes to DB. Returns (promoted, maybe, dropped)."""
         maybe = 0
         dropped = 0
-        # promoted_count already includes auto-promoted non-galleries
-        promoted = state.get("promoted_count", 0)
-
-        outcome_score = {"cold": 75, "maybe": 50, "dropped": 20}
-
-        for s in state.get("scores", []):
+        for s in scores:
             try:
-                update_contact(
+                self._update_contact(
                     contact_id=s["contact_id"],
                     status=s["outcome"],
-                    fit_score=outcome_score.get(s["outcome"], 50),
+                    fit_score=_OUTCOME_SCORE.get(s["outcome"], 50),
                     notes=s["reasoning"],
                 )
                 if s["outcome"] == "cold":
-                    promoted += 1
+                    promoted_count += 1
                 elif s["outcome"] == "maybe":
                     maybe += 1
                 else:
                     dropped += 1
             except Exception:
                 pass
-        return {"promoted_count": promoted, "maybe_count": maybe, "dropped_count": dropped}
+        return promoted_count, maybe, dropped
 
-    def generate_report(state: ScoutState) -> dict:
-        promoted = state.get("promoted_count", 0)
-        maybe = state.get("maybe_count", 0)
-        dropped = state.get("dropped_count", 0)
-        total = len(state.get("candidates", []))
-        gallery_count = len(state.get("gallery_candidates", []))
-        errs = state.get("errors", [])
 
-        summary = (
-            f"scout_agent: {total} candidates — "
-            f"{promoted} promoted to cold, {maybe} flagged maybe, {dropped} dropped "
-            f"({gallery_count} galleries evaluated by LLM)"
-        )
-        if errs:
-            summary += f", {len(errs)} error(s)"
+def create_scout_agent(
+    llm: LanguageModel,
+    fetch_candidates: CandidateFetcher,
+    update_contact: ContactUpdater,
+    fetch_page: PageFetcher,
+    fetch_city_context: CityContextFetcher,
+    start_run: RunStarter,
+    finish_run: RunFinisher,
+    mission: AgentMission,
+) -> _ScoutAgent:
+    """
+    Build and return a scout agent.
 
-        finish_run(
-            state.get("run_id", 0),
-            "completed",
-            summary,
-            {"promoted": promoted, "maybe": maybe, "dropped": dropped, "total": total},
-        )
-        return {"summary": summary}
+    Non-gallery contacts are auto-promoted to cold. Galleries are scored by
+    LLM using fetched website content and city market context.
 
-    graph = StateGraph(ScoutState)
-    graph.add_node("init", init)
-    graph.add_node("fetch", fetch)
-    graph.add_node("split_and_promote", split_and_promote)
-    graph.add_node("fetch_gallery_websites", fetch_gallery_websites)
-    graph.add_node("score_galleries", score_galleries)
-    graph.add_node("apply_scores", apply_scores)
-    graph.add_node("generate_report", generate_report)
-
-    graph.set_entry_point("init")
-    graph.add_edge("init", "fetch")
-    graph.add_edge("fetch", "split_and_promote")
-    graph.add_edge("split_and_promote", "fetch_gallery_websites")
-    graph.add_edge("fetch_gallery_websites", "score_galleries")
-    graph.add_edge("score_galleries", "apply_scores")
-    graph.add_edge("apply_scores", "generate_report")
-    graph.add_edge("generate_report", END)
-
-    return graph.compile()
+    Usage:
+        agent = create_scout_agent(llm=..., fetch_candidates=..., ...)
+        result = agent.invoke({"limit": 50})
+        print(result["summary"])
+    """
+    return _ScoutAgent(
+        llm=llm,
+        fetch_candidates=fetch_candidates,
+        update_contact=update_contact,
+        fetch_page=fetch_page,
+        fetch_city_context=fetch_city_context,
+        start_run=start_run,
+        finish_run=finish_run,
+        mission=mission,
+    )
