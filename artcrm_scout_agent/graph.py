@@ -95,8 +95,8 @@ class _ScoutAgent:
                         notes="Auto-promoted: non-gallery venue.",
                     )
                     promoted += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("scout: auto-promote failed for contact %s: %s", contact.get("id"), e)
         return galleries, promoted
 
     def _fetch_gallery_websites(self, galleries: list[dict]) -> list[dict]:
@@ -109,8 +109,8 @@ class _ScoutAgent:
             if website:
                 try:
                     website_content = self._fetch_page(website)[:4000]
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("scout: website fetch failed for %s: %s", website, e)
             contact["website_content"] = website_content
             enriched.append(contact)
         return enriched
@@ -126,7 +126,8 @@ class _ScoutAgent:
             if cache_key not in city_context_cache:
                 try:
                     city_context_cache[cache_key] = self._fetch_city_context(city, country)
-                except Exception:
+                except Exception as e:
+                    logger.debug("scout: city context fetch failed for %s: %s", cache_key, e)
                     city_context_cache[cache_key] = {}
             system, user = score_gallery_prompt(self._mission, contact, city_context_cache[cache_key])
             try:
@@ -166,8 +167,8 @@ class _ScoutAgent:
                     maybe += 1
                 else:
                     dropped += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("scout: failed to write outcome for contact %s: %s", s.get("contact_id"), e)
         return promoted_count, maybe, dropped
 
 
